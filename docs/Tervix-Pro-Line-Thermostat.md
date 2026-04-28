@@ -1,7 +1,8 @@
 # Tervix Pro Line ZigBee Thermostat
 
 - **Source:** [`devices/TZE200_6kijc7nd.js`](../devices/TZE200_6kijc7nd.js)
-- **Model ID:** `TS0601_tervix_pro_line`
+- **Upstream:** merged into `zigbee-herdsman-converters` in `src/devices/tuya.ts` as `TS0601_thermostat_tervix_pro`. The local converter remains as a reference / fallback for older Z2M installs.
+- **Model ID:** `TS0601_thermostat_tervix_pro` (upstream) / `TS0601_tervix_pro_line` (local file)
 - **Vendor:** Tervix
 - **Zigbee model:** `TS0601`
 - **Use case:** thermostat for underfloor heating / radiator (Tuya TS0601-based)
@@ -11,13 +12,15 @@
 | modelID | manufacturerName |
 | --- | --- |
 | `TS0601` | `_TZE200_6kijc7nd` |
+| `TS0601` | `_TZE204_6kijc7nd` |
+| `TS0601` | `_TZE284_6kijc7nd` |
 
 ## Configuration
 
 Uses `tuya.modernExtend.tuyaBase` with these flags:
 
 - `dp: true` — standard Tuya-DP wiring (`fz/tz.datapoints`, `configureMagicPacket`).
-- `timeStart: '2000'` — reply to `commandMcuSyncTime` with the correct time. Without this flag `tuyaBase` only sends a ZCL `defaultResponse`, and the thermostat MCU keeps retrying its time request — loading NPI/UART.
+- `timeStart: '1970'` — reply to `commandMcuSyncTime` with the correct time (UNIX epoch base). Without this flag `tuyaBase` only sends a ZCL `defaultResponse`, and the thermostat MCU keeps retrying its time request — loading NPI/UART.
 - `forceTimeUpdates: true` — proactively re-sync the clock once an hour. Tervix Pro Line clocks drift noticeably.
 
 ## Exposes
@@ -37,9 +40,9 @@ Uses `tuya.modernExtend.tuyaBase` with these flags:
 
 | Expose | Type | Description |
 | --- | --- | --- |
-| `window_detection` | binary | Enable open-window detection (DP 8) |
-| `window_state` | binary (read-only) | Window state (DP 25) |
-| `frost_protection` | binary | Frost protection (DP 10) |
+| `window_detection` | binary `ON`/`OFF` | Enable open-window detection (DP 8) |
+| `window_state` | binary `OPEN`/`CLOSE` (read-only) | Window state (DP 25) |
+| `frost_protection` | binary `ON`/`OFF` | Frost protection (DP 10) |
 | `open_window_time` | 0…60 min | Trigger duration (DP 104) |
 | `open_window_temp` | 0…30 °C, step 0.5 | Temperature threshold (DP 105) |
 | `open_window_delay_time` | 0…60 min | Delay (DP 106) |
@@ -48,10 +51,10 @@ Uses `tuya.modernExtend.tuyaBase` with these flags:
 
 | Expose | Range | Description |
 | --- | --- | --- |
-| `child_lock` | binary | Button lock (DP 40) |
+| `child_lock` | binary `LOCK`/`UNLOCK` | Button lock (DP 40) |
 | `temperature_ceiling` | 35…95 °C, step 0.5 | Setpoint ceiling (DP 19) |
 | `running_mode` | `heat` / `cool` | Operating mode (DP 58) |
-| `factory_reset` | binary (SET) | Factory reset (DP 39, set true to trigger) |
+| `factory_reset` | binary `ON`/`OFF` (SET) | Factory reset (DP 39, set ON to trigger) |
 | `switch_sensitivity` | 0…100 | Switching sensitivity (DP 101) |
 
 ### Humidity
@@ -66,7 +69,7 @@ Uses `tuya.modernExtend.tuyaBase` with these flags:
 
 | Expose | Range / Values | Description |
 | --- | --- | --- |
-| `sensor_selection` | `internal`, `external`, `both` | Sensor selection (DP 43) |
+| `sensor` | `internal`, `external`, `both` | Sensor selection (DP 43) — exposed as `sensor` in upstream via `e.temperature_sensor_select`; named `sensor_selection` in the local file |
 | `floor_max_temperature` | 5…60 °C, step 0.5 | Floor over-temperature protection (DP 102) |
 | `floor_min_temperature` | 10…30 °C, step 0.5 | Floor lower limit (DP 103) |
 
@@ -122,8 +125,8 @@ Raw byte sequence for the example above:
 | 27 | `local_temperature_calibration` | int (1°C) | `raw` |
 | 34 | `humidity` | int (%) | `raw` |
 | 39 | `factory_reset` | bool | `onOff` |
-| 40 | `child_lock` | bool | `onOff` |
-| 43 | `sensor_selection` | enum | lookup `{internal:0, external:1, both:2}` |
+| 40 | `child_lock` | bool | `lockUnlock` (`LOCK:true, UNLOCK:false`) — local file uses `onOff` |
+| 43 | `sensor` (upstream) / `sensor_selection` (local) | enum | lookup `{internal:0, external:1, both:2}` |
 | 48 | `program` | raw (48 B) | custom (5+1+1, see above) |
 | 58 | `running_mode` | enum | lookup `{heat:0, cool:1}` |
 | 101 | `switch_sensitivity` | int | `raw` |
@@ -139,7 +142,32 @@ Raw byte sequence for the example above:
 ## Notes
 
 - `local_temperature_calibration` (DP 27) on this MCU has step **1 °C**, not 0.1.
-- `factory_reset` (DP 39) is a set-only trigger; the device resets automatically on receiving `true`.
+- `factory_reset` (DP 39) is a set-only trigger; the device resets automatically on receiving `ON`/`true`.
 - `system_mode` is mapped as a bool (`off:false / heat:true`), not as an enum — at the DP level it's a `bool`.
 - `running_state` (DP 3) is read-only — it's a heating status, not a mode.
 - DP 61 (`week program periods`) is present on the device but unused by the current converter.
+
+## Upstream PR notes (changes vs. previous upstream definition)
+
+The previous upstream definition (`_TZE284_6kijc7nd`/`_TZE204_6kijc7nd` in `tuya.ts`) used non-conventional names and only exposed the schedule as a placeholder text field. The PR brings:
+
+- Adds `_TZE200_6kijc7nd` to the fingerprint.
+- Switches `tuyaBase` to `{dp: true, timeStart: "1970", forceTimeUpdates: true}` for clock stability.
+- Replaces text `week_schedule` with structured `program` composite (5+1+1, 4 periods/day; 48-byte buffer) — same encoding documented above.
+- Renames exposes to Z2M conventions (breaking for existing 284/204 users):
+  - `mode` → `preset` (now part of climate)
+  - `working_status` → removed (use climate `running_state` from DP 3)
+  - `window_check` → `window_detection`
+  - `window_state` values: `open`/`close` → `OPEN`/`CLOSE`
+  - `temperature_correction` → `local_temperature_calibration` (also on climate)
+  - `upper_temp` → `temperature_ceiling`
+  - `floor_temp_protection` → `floor_max_temperature`
+  - `floor_low_protection` → `floor_min_temperature`
+  - `window_open_detection_time` → `open_window_time`
+  - `window_open_detection_temp` → `open_window_temp` (DP value is 0.1 °C — now `divideBy10`)
+  - `window_open_delay_time` → `open_window_delay_time`
+  - `run_mode` (`heat_mode`/`cool_mode`) → `running_mode` (`heat`/`cool`)
+  - `sensor_choose` (`in`/`out`) → `sensor` via `e.temperature_sensor_select(['internal','external','both'])` — DP 43 also gains the `both` value
+  - `child_lock`: now `LOCK`/`UNLOCK` via `tuya.valueConverter.lockUnlock` and `e.child_lock()`
+  - `switch_sensitivity`: dropped `divideBy10` (raw 0…100 to match DP semantics)
+  - `current_heating_setpoint`: max raised from 35 to 95 °C to match `temperature_ceiling`

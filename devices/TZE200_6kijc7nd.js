@@ -15,69 +15,103 @@ const exposesLocal = {
   program_temperature: (name) => e.numeric(name, ea.STATE_SET).withUnit('°C').withValueMin(5).withValueMax(35).withValueStep(0.5),
 };
 
+// Tervix Pro Line weekly program (DP 48): 5 + 1 + 1 layout (weekdays / Saturday / Sunday),
+// 4 periods per day, each period encoded as [hour:1][minute:1][temperature*10:2 BE].
+// Total payload is 48 bytes (3 days x 4 periods x 4 bytes).
+const tuyaTervixProgramConverter = {
+  to: (v) => {
+    const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+    const buildDay = (prefix) => {
+      const buf = Buffer.alloc(16);
+      for (let p = 1; p <= 4; p++) {
+        const off = (p - 1) * 4;
+        const hour = clamp(Number(v?.[`${prefix}_p${p}_hour`] ?? 0), 0, 23);
+        const minute = clamp(Number(v?.[`${prefix}_p${p}_minute`] ?? 0), 0, 59);
+        const temp = clamp(Math.round(Number(v?.[`${prefix}_p${p}_temperature`] ?? 0) * 10), 0, 0xffff);
+        buf.writeUInt8(hour, off);
+        buf.writeUInt8(minute, off + 1);
+        buf.writeUInt16BE(temp, off + 2);
+      }
+      return buf;
+    };
+    return Buffer.concat([buildDay('weekdays'), buildDay('saturday'), buildDay('sunday')]);
+  },
+  from: (v) => {
+    const parseDay = (prefix, buf16) => {
+      const out = {};
+      for (let p = 1; p <= 4; p++) {
+        const off = (p - 1) * 4;
+        out[`${prefix}_p${p}_hour`] = buf16.readUInt8(off);
+        out[`${prefix}_p${p}_minute`] = buf16.readUInt8(off + 1);
+        out[`${prefix}_p${p}_temperature`] = buf16.readUInt16BE(off + 2) / 10;
+      }
+      return out;
+    };
+    return {
+      ...parseDay('weekdays', v.subarray(0, 16)),
+      ...parseDay('saturday', v.subarray(16, 32)),
+      ...parseDay('sunday', v.subarray(32, 48)),
+    };
+  },
+};
+
 const definition = {
-  fingerprint: [
-    { modelID: 'TS0601', manufacturerName: '_TZE200_6kijc7nd' },
-  ],
-  model: 'TS0601_tervix_pro_line',
+  fingerprint: tuya.fingerprint('TS0601', ['_TZE200_6kijc7nd', '_TZE204_6kijc7nd', '_TZE284_6kijc7nd']),
+  model: 'TS0601_thermostat_tervix_pro',
   vendor: 'Tervix',
-  description: 'Tervix Pro Line Zigbee',
+  description: 'Pro Line Zigbee thermostat',
   extend: [tuya.modernExtend.tuyaBase({
     dp: true,
-    timeStart: '2000',
+    timeStart: '1970',
     forceTimeUpdates: true,
   })],
   exposes: [
-    // Climate
     e.climate()
       .withSetpoint('current_heating_setpoint', 5, 95, 0.5, ea.STATE_SET)
       .withLocalTemperature(ea.STATE)
-      .withSystemMode(['off', 'heat'])
-      // preset_mode: Manual/Program
+      .withSystemMode(['off', 'heat'], ea.STATE_SET)
+      .withRunningState(['idle', 'heat'], ea.STATE)
       .withPreset(['manual', 'program'])
       .withLocalTemperatureCalibration(-9, 9, 1, ea.STATE_SET),
 
-    // DP40 child_lock (switch)
-    e.switch().withState('child_lock', true, false).withDescription('Child lock'),
+    e.child_lock().withDescription('Enables or disables the child lock feature.'),
 
-    // DP8 window_detection (binary)
-    e.binary('window_detection', ea.STATE, true, false).withDescription('Window detection enabled'),
-    // DP25 window_state (binary)
-    e.binary('window_state', ea.STATE, true, false).withDescription('Open window state'),
+    e.temperature_sensor_select(['internal', 'external', 'both'])
+      .withDescription('Selects between internal or external temperature sensors.'),
 
-    // DP10 frost_protection (binary)
-    e.binary('frost_protection', ea.STATE, true, false),
+    // DP 8 window_detection
+    e.binary('window_detection', ea.STATE_SET, 'ON', 'OFF')
+      .withDescription('Checks whether the window is open or closed.'),
+    // DP 25 window_state
+    e.binary('window_state', ea.STATE, 'OPEN', 'CLOSE')
+      .withDescription('Indicates whether the window is open or closed.'),
 
-    // DP58 running_mode enum
-    e.enum('running_mode', ea.STATE_SET, ['heat', 'cool']).withDescription('Running mode'),
+    // DP 10 frost_protection
+    e.binary('frost_protection', ea.STATE_SET, 'ON', 'OFF')
+      .withDescription('Enables frost protection mode.'),
 
-    // DP19 temperature_ceiling number (°C, 0.1)
+    // DP 58 running_mode
+    e.enum('running_mode', ea.STATE_SET, ['heat', 'cool'])
+      .withDescription('Operation mode of the thermostat (heat or cool).'),
+
+    // DP 19 temperature_ceiling
     e.numeric('temperature_ceiling', ea.STATE_SET)
       .withUnit('°C').withValueMin(35).withValueMax(95).withValueStep(0.5)
-      .withDescription('Temperature ceiling'),
+      .withDescription('Set the upper temperature limit'),
 
-    // DP27 local_temperature_calibration (°C)
-    e.numeric('local_temperature_calibration', ea.STATE_SET)
-      .withUnit('°C').withValueMin(-9).withValueMax(9).withValueStep(1)
-      .withDescription('Temperature correction'),
+    // DP 34 humidity
+    e.humidity().withDescription('Displays the current relative humidity level in percentage.'),
 
-    // DP34 humidity (%)
-    e.humidity(),
+    // DP 107 humidity_control
+    e.binary('humidity_control', ea.STATE_SET, 'ON', 'OFF')
+      .withDescription('Controls the humidity protection feature.'),
 
-    // DP107 humidity_control (binary)
-    e.binary('humidity_control', ea.STATE, true, false),
-
-    // DP108 upper_humidity_limit (%)
+    // DP 108 upper_humidity_limit
     e.numeric('upper_humidity_limit', ea.STATE_SET)
       .withUnit('%').withValueMin(0).withValueMax(100).withValueStep(1),
 
-    // DP43 sensor_selection enum
-    e.enum('sensor_selection', ea.STATE_SET, ['internal', 'external', 'both'])
-      .withDescription('Sensor selection'),
-
-    // DP48 program
-    e
-      .composite('program', 'program', ea.STATE_SET)
+    // DP 48 program (5+1+1, 4 periods per day)
+    e.composite('program', 'program', ea.STATE_SET)
       .withDescription('Time of day and setpoint to use when in program mode')
       .withFeature(exposesLocal.hour('weekdays_p1_hour'))
       .withFeature(exposesLocal.minute('weekdays_p1_minute'))
@@ -116,46 +150,49 @@ const definition = {
       .withFeature(exposesLocal.minute('sunday_p4_minute'))
       .withFeature(exposesLocal.program_temperature('sunday_p4_temperature')),
 
-    // DP101 switch_sensitivity (0..100)
+    // DP 101 switch_sensitivity (0..100)
     e.numeric('switch_sensitivity', ea.STATE_SET)
-      .withValueMin(0).withValueMax(100).withValueStep(1),
+      .withValueMin(0).withValueMax(100).withValueStep(1)
+      .withDescription('Temperature difference threshold to trigger switching.'),
 
-    // DP102 floor_max_temperature (°C, 0.1)
+    // DP 102 floor_max_temperature
     e.numeric('floor_max_temperature', ea.STATE_SET)
       .withUnit('°C').withValueMin(5).withValueMax(60).withValueStep(0.5)
-      .withDescription('Floor maximum temperature protection'),
+      .withDescription('Maximum allowed floor temperature for protection.'),
 
-    // DP103 floor_min_temperature (°C, 0.1)
+    // DP 103 floor_min_temperature
     e.numeric('floor_min_temperature', ea.STATE_SET)
       .withUnit('°C').withValueMin(10).withValueMax(30).withValueStep(0.5)
-      .withDescription('Floor minimum temperature'),
+      .withDescription('Minimum allowed floor temperature for protection.'),
 
-    // DP104 open_window_time (min)
+    // DP 104 open_window_time
     e.numeric('open_window_time', ea.STATE_SET)
-      .withUnit('min').withValueMin(0).withValueMax(60).withValueStep(1),
+      .withUnit('min').withValueMin(0).withValueMax(60).withValueStep(1)
+      .withDescription('Window open detection threshold in minutes.'),
 
-    // DP105 open_window_temp (°C, 0.1)
+    // DP 105 open_window_temp
     e.numeric('open_window_temp', ea.STATE_SET)
-      .withUnit('°C').withValueMin(0).withValueMax(30).withValueStep(0.5),
+      .withUnit('°C').withValueMin(0).withValueMax(30).withValueStep(0.5)
+      .withDescription('Temperature threshold for window open detection.'),
 
-    // DP106 open_window_delay_time (min)
+    // DP 106 open_window_delay_time
     e.numeric('open_window_delay_time', ea.STATE_SET)
-      .withUnit('min').withValueMin(0).withValueMax(60).withValueStep(1),
+      .withUnit('min').withValueMin(0).withValueMax(60).withValueStep(1)
+      .withDescription('Delay time for triggering window open detection (minutes).'),
 
-    // DP39 factory_reset (binary "action-like")
-    e.binary('factory_reset', ea.STATE_SET, true, false)
-      .withDescription('Factory reset (set true to trigger)'),
+    // DP 39 factory_reset
+    e.binary('factory_reset', ea.STATE_SET, 'ON', 'OFF')
+      .withDescription('WARNING: Restores the device to factory settings. All configurations will be lost.'),
   ],
   meta: {
     tuyaDatapoints: [
-      // DP 1 System mode (on/off) -> system_mode off/heat
+      // DP 1 System mode (on/off) -> system_mode off/heat (Tuya bool DP)
       [1, 'system_mode', tuya.valueConverterBasic.lookup({ off: false, heat: true })],
 
-      // DP 2 ProgramMode enum: 0=Manual, 1=Program
+      // DP 2 ProgramMode enum: 0=Manual, 1=Program -> climate preset
       [2, 'preset', tuya.valueConverterBasic.lookup({ manual: 0, program: 1 })],
 
-      // DP 3 Working status -> running_state (no separate expose; can be added if needed)
-      // In Z2M "running_state" is typically exposed as a string.
+      // DP 3 Working status -> climate running_state
       [3, 'running_state', tuya.valueConverterBasic.lookup({ idle: 0, heat: 1 })],
 
       // DP 8 Window check
@@ -173,13 +210,10 @@ const definition = {
       // DP 24 Current temperature 0.1°C
       [24, 'local_temperature', tuya.valueConverter.divideBy10],
 
-      // DP 58 RunningMode: 0=Heat, 1=Cool
-      [58, 'running_mode', tuya.valueConverterBasic.lookup({ heat: 0, cool: 1 })],
-
       // DP 25 Window state
-      [25, 'window_state', tuya.valueConverter.onOff],
+      [25, 'window_state', tuya.valueConverterBasic.lookup({ OPEN: 1, CLOSE: 0 })],
 
-      // DP 27 Temperature correction (usually int, step 1°C)
+      // DP 27 Temperature correction (int, step 1°C) -> climate local_temperature_calibration
       [27, 'local_temperature_calibration', tuya.valueConverter.raw],
 
       // DP 34 Humidity display
@@ -188,75 +222,19 @@ const definition = {
       // DP 39 Factory reset
       [39, 'factory_reset', tuya.valueConverter.onOff],
 
-      // DP 40 Child lock
-      [40, 'child_lock', tuya.valueConverter.onOff],
+      // DP 40 Child lock (LOCK/UNLOCK)
+      [40, 'child_lock', tuya.valueConverter.lockUnlock],
 
       // DP 43 Sensor selection: 0 internal, 1 external, 2 both
-      [43, 'sensor_selection', tuya.valueConverterBasic.lookup({ internal: 0, external: 1, both: 2 })],
+      [43, 'sensor', tuya.valueConverterBasic.lookup({ internal: 0, external: 1, both: 2 })],
 
-      // DP 48 Weekly program (5+1+1)
-      [
-        48,
-        'program',
-        {
-          to: (v, meta) => {
-            const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+      // DP 48 Weekly program (5+1+1, 4 periods/day)
+      [48, 'program', tuyaTervixProgramConverter],
 
-            const build16 = (prefix) => {
-              const b = Buffer.alloc(16);
+      // DP 58 RunningMode: 0=Heat, 1=Cool
+      [58, 'running_mode', tuya.valueConverterBasic.lookup({ heat: 0, cool: 1 })],
 
-              for (let p = 1; p <= 4; p++) {
-                const off = (p - 1) * 4;
-
-                const hour = v?.[`${prefix}_p${p}_hour`] ?? 0;
-                const minute = v?.[`${prefix}_p${p}_minute`] ?? 0;
-                const temp = v?.[`${prefix}_p${p}_temperature`] ?? 0;
-
-                const h = clamp(Number(hour), 0, 23);
-                const m = clamp(Number(minute), 0, 59);
-
-                const t10 = clamp(Math.round(Number(temp) * 10), 0, 0xffff);
-
-                b.writeUInt8(h, off);
-                b.writeUInt8(m, off + 1);
-                b.writeUInt16BE(t10, off + 2);
-              }
-
-              return b;
-            };
-
-            return Buffer.concat([
-              build16('weekdays'),
-              build16('saturday'),
-              build16('sunday'),
-            ]);
-          },
-          from:
-            (v, meta) => {
-              const format = (prefix, buf16) => {
-                const out = {};
-
-                for (let p = 1; p <= 4; p++) {
-                  const off = (p - 1) * 4;
-
-                  out[`${prefix}_p${p}_hour`] = buf16.readUInt8(off);
-                  out[`${prefix}_p${p}_minute`] = buf16.readUInt8(off + 1);
-                  out[`${prefix}_p${p}_temperature`] = buf16.readUInt16BE(off + 2) / 10;
-                }
-
-                return out;
-              };
-
-              return {
-                ...format('weekdays', v.slice(0, 16)),
-                ...format('saturday', v.slice(16, 32)),
-                ...format('sunday', v.slice(32, 48)),
-              };
-            },
-        },
-      ],
-
-      // DP 101 Switch sensitivity
+      // DP 101 Switch sensitivity (raw 0..100)
       [101, 'switch_sensitivity', tuya.valueConverter.raw],
 
       // DP 102 Floor max temp 0.1°C
@@ -282,3 +260,5 @@ const definition = {
     ],
   },
 };
+
+module.exports = definition;
